@@ -4,4 +4,5 @@ pub mod market;
 pub mod rest_model;
 pub mod userstream;
 pub mod websockets;
+pub mod ws_api;
 pub mod ws_model;

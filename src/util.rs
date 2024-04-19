@@ -98,3 +98,18 @@ pub fn bool_to_string(b: bool) -> String {
 }
 
 pub fn bool_to_string_some(b: bool) -> Option<String> { Some(bool_to_string(b)) }
+
+// require f64 for json string.
+pub fn serialize_and_jsonf64_to_jsonstr<T: serde::Serialize>(target: T) -> Result<serde_json::Value> {
+    let mut orders = serde_json::to_value(target)?;
+    let json_kv = orders
+        .as_object_mut()
+        .ok_or(Error::Msg("target not kv pairs of object.".into()))?;
+
+    for value in json_kv.values_mut() {
+        if value.is_f64() {
+            *value = serde_json::Value::String(value.to_string());
+        }
+    }
+    Ok(orders)
+}
