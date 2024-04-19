@@ -1,6 +1,6 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use futures::StreamExt;
+use futures::{SinkExt, StreamExt};
 use serde_json::from_str;
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::handshake::client::Response;
@@ -132,26 +132,22 @@ impl<'a, WE: serde::de::DeserializeOwned> WebSockets<'a, WE> {
     pub fn socket(&self) -> &Option<(WebSocketStream<MaybeTlsStream<TcpStream>>, Response)> { &self.socket }
 
     pub async fn event_loop(&mut self, running: &AtomicBool) -> Result<()> {
-        while running.load(Ordering::Relaxed) {
-            if let Some((ref mut socket, _)) = self.socket {
-                // TODO: return error instead of panic?
-                let message = socket.next().await.unwrap()?;
+        if let Some((socket, _)) = self.socket.as_mut() {
+            while running.load(Ordering::Relaxed) {
+                let timestamp = chrono::Utc::now().timestamp_millis().to_string().as_bytes().to_vec();
+                socket.send(Message::Ping(timestamp)).await?;
 
-                match message {
+                match socket.select_next_some().await? {
                     Message::Text(msg) => {
-                        if msg.is_empty() {
-                            return Ok(());
-                        }
-                        let event: WE = from_str(msg.as_str())?;
-                        (self.handler)(event)?;
+                        (self.handler)(from_str::<'_, WE>(msg.as_str())?)?;
                     }
-                    Message::Ping(_) | Message::Pong(_) | Message::Binary(_) | Message::Frame(_) => {}
-                    Message::Close(e) => {
-                        return Err(Error::Msg(format!("Disconnected {e:?}")));
-                    }
+                    Message::Ping(ping) => socket.send(Message::Pong(ping)).await?,
+                    Message::Close(e) => return Err(Error::Msg(format!("Disconnected {e:?}"))),
+                    _ => {}
                 }
             }
-        }
+        };
+
         Ok(())
     }
 }
