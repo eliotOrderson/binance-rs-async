@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::Config;
 use crate::errors::{BinanceContentError, Error, Result};
 use crate::futures::account::OrderRequest;
-use crate::futures::rest_model::{OrderSide, Position, Transaction};
+use crate::futures::rest_model::{AccountBalance, AccountInformation, OrderSide, Position, Transaction};
 use crate::rest_model::RateLimit;
 
 use super::ws_model::PriceMatch;
@@ -63,9 +63,16 @@ enum Method {
     #[serde(rename = "order.status")]
     OrderQuery,
 
-    // if require modification order then maybe should not be submition.
+    // the method only supported limit order,
+    // this is not always useful.
     // #[serde(rename = "order.modify")]
     // OrderModify,
+    #[serde(rename = "account.status")]
+    AccountInfo,
+
+    #[serde(rename = "account.balance")]
+    AccountBalance,
+
     #[serde(rename = "account.position")]
     AccountPosition,
 
@@ -90,6 +97,8 @@ impl Method {
             }
 
             Method::OrderPlace
+            | Method::AccountBalance
+            | Method::AccountInfo
             | Method::OrderCancel
             | Method::OrderQuery
             | Method::AccountPosition
@@ -311,6 +320,28 @@ impl FuturesWebSocketApi {
         self.unwrap_result(&mut rsp[0]).await
     }
 
+    pub async fn account_balance(&mut self) -> Result<Vec<AccountBalance>> {
+        let req = WsRequest {
+            id: "account_balance".into(),
+            method: Method::AccountBalance,
+            params: Some(serde_json::json!({})),
+        };
+
+        let mut rsp = self.send::<Vec<AccountBalance>, _>(!self.auto_logon, &[req]).await?;
+        self.unwrap_result(&mut rsp[0]).await
+    }
+
+    pub async fn account_info(&mut self) -> Result<AccountInformation> {
+        let req = WsRequest {
+            id: "account_info".into(),
+            method: Method::AccountInfo,
+            params: Some(serde_json::json!({})),
+        };
+
+        let mut rsp = self.send(!self.auto_logon, &[req]).await?;
+        self.unwrap_result(&mut rsp[0]).await
+    }
+
     pub async fn position_info<S: Into<String>>(&mut self, symbol: S) -> Result<Vec<Position>> {
         let req = WsRequest {
             id: "query_position_info".into(),
@@ -383,10 +414,10 @@ impl FuturesWebSocketApi {
     // handle error and unwrap result
     pub async fn unwrap_result<T: std::fmt::Debug>(&self, rsp: &mut WsResponse<T>) -> Result<T> {
         // println!("{:?}\n", rsp);
-        if let Some(err) = std::mem::take(&mut rsp.error) {
+        if let Some(err) = rsp.error.take() {
             return Err(Error::BinanceError { response: err });
         }
-        Ok(std::mem::take(&mut rsp.result).unwrap())
+        Ok(rsp.result.take().unwrap())
     }
 
     /// Disconnect from the endpoint
@@ -586,6 +617,8 @@ mod tests {
         ws_api.connect(return_rate_limits).await.unwrap();
 
         // println!("{:?}\n", ws_api.position_info("BTCUSDT").await.unwrap());
+        // println!("{:?}\n", ws_api.account_info().await.unwrap());
+        println!("{:?}\n", ws_api.account_balance().await.unwrap());
         // println!(
         //     "{:?}",
         //     ws_api

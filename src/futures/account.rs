@@ -412,10 +412,17 @@ mod tests {
             .unwrap()
             .into();
 
-        stop_order.stop_price = Some(58000.);
+        let stop_price = 58000.;
+        match stop_order.order_type {
+            OrderType::Stop => {
+                stop_order.price = Some(stop_price);
+                stop_order.stop_price = Some(stop_price);
+            }
+            OrderType::StopMarket => stop_order.stop_price = Some(stop_price),
+            _ => (),
+        };
         let symbol = stop_order.symbol.clone();
-        let client_id = stop_order.new_client_order_id.clone();
-        stop_order.new_client_order_id = None;
+        let client_id = stop_order.new_client_order_id.take();
 
         // println!("{:?}", stop_order);
         account.place_order(stop_order).await.unwrap();
