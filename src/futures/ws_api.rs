@@ -27,7 +27,7 @@ use crate::config::Config;
 use crate::errors::{BinanceContentError, Error, Result};
 use crate::futures::account::OrderRequest;
 use crate::futures::rest_model::{AccountBalance, AccountInformation, OrderSide, Position, Transaction};
-use crate::rest_model::RateLimit;
+use crate::rest_model::{RateLimit, Tickers};
 
 use super::ws_model::PriceMatch;
 
@@ -63,10 +63,18 @@ enum Method {
     #[serde(rename = "order.status")]
     OrderQuery,
 
-    // the method only supported limit order,
-    // this is not always useful.
+    // these method function not important.
+    // the method only supported limit order, this is not always useful.
     // #[serde(rename = "order.modify")]
     // OrderModify,
+
+    // #[serde(rename = "ticker.price")]
+    // LastestPrice,
+
+    // #[serde(rename = "depth")]
+    // OrderLimitDepth,
+
+    // account
     #[serde(rename = "account.status")]
     AccountInfo,
 
@@ -76,7 +84,10 @@ enum Method {
     #[serde(rename = "account.position")]
     AccountPosition,
 
-    // user stram
+    #[serde(rename = "ticker.book")]
+    BestMarkPrice,
+
+    // user stream
     #[serde(rename = "userDataStream.start")]
     UserDataStreamStart,
 
@@ -91,18 +102,11 @@ impl Method {
     // authorization authentication (signature or apiKey, none)
     pub fn require_authorization(&self) -> Authorization {
         match self {
-            Method::SessionStatus | Method::SessionLogout => Authorization::None,
+            Method::BestMarkPrice | Method::SessionStatus | Method::SessionLogout => Authorization::None,
             Method::UserDataStreamStart | Method::UserDataStreamKeepAlive | Method::UserDataStreamStop => {
                 Authorization::ApiKey
             }
-
-            Method::OrderPlace
-            | Method::AccountBalance
-            | Method::AccountInfo
-            | Method::OrderCancel
-            | Method::OrderQuery
-            | Method::AccountPosition
-            | Method::SessionLogon => Authorization::Both,
+            _ => Authorization::Both,
         }
     }
 }
@@ -131,7 +135,6 @@ pub struct FuturesWebSocketApi {
     // response info in first connection.
     pub response: Option<Response>,
 
-    // pub socket: Option<WebSocketStream<MaybeTlsStream<TcpStream>>>,
     socket: Option<Arc<Mutex<WebSocketStream<MaybeTlsStream<TcpStream>>>>>,
 
     conf: Config,
@@ -163,7 +166,7 @@ impl FuturesWebSocketApi {
     }
 
     /// logon only used of ed25519, if not have the key, can use '[generate_ed25519_key]' gain it.
-    /// if logon for true then not require signature on per request.
+    /// if auto_logon for true then not require api key and signature on per request.
     pub fn new_with_ed25519_options<S1, S2>(auto_logon: bool, api_key: S1, private_key_pem: S2, conf: Config) -> Self
     where
         S1: Into<String>,
@@ -188,29 +191,21 @@ impl FuturesWebSocketApi {
         }
     }
 
-    pub async fn auto_check_connection(socket: Arc<Mutex<WebSocketStream<MaybeTlsStream<TcpStream>>>>) {
+    pub async fn heartbeat(socket: Arc<Mutex<WebSocketStream<MaybeTlsStream<TcpStream>>>>) {
         loop {
+            let timestamp = chrono::Utc::now().timestamp();
+            let ping_msg = timestamp.to_string().as_bytes().to_vec();
             {
-                let utc = chrono::Utc::now();
-                let timestamp = utc.timestamp().to_string().as_bytes().to_vec();
-
                 let mut sk = socket.lock().await;
-                let ping_result = sk.send(Message::Ping(timestamp)).await;
-                println!("ping: {:?}", utc);
+                if let Err(e) = sk.send(Message::Ping(ping_msg)).await {
+                    break eprintln!("ping server error = {e:?}.");
+                };
 
                 match sk.select_next_some().await {
-                    Ok(message) => {
-                        if let Message::Ping(ping) = message {
-                            let datetime = chrono::NaiveDateTime::from_timestamp_millis(
-                                String::from_utf8(ping.clone()).unwrap().parse::<i64>().unwrap(),
-                            );
-                            let datetime = datetime.unwrap();
-                            println!("{}", datetime);
-
-                            let pong_result = sk.send(Message::Pong(ping)).await;
-                            println!("send pong: {:?}", pong_result);
-                        }
+                    Ok(Message::Ping(ping)) => {
+                        sk.send(Message::Pong(ping)).await;
                     }
+                    Ok(_) => (),
                     Err(e) => println!("check error: {e:?}\n"),
                 }
             }
@@ -320,6 +315,19 @@ impl FuturesWebSocketApi {
         self.unwrap_result(&mut rsp[0]).await
     }
 
+    pub async fn best_mark_price<S: Into<String>>(&mut self, symbol: S) -> Result<Tickers> {
+        let req = WsRequest {
+            id: "Best_price_on_the_order_book".into(),
+            method: Method::BestMarkPrice,
+            params: Some(serde_json::json!({
+                "symbol": symbol.into()
+            })),
+        };
+
+        let mut rsp = self.send(!self.auto_logon, &[req]).await?;
+        self.unwrap_result(&mut rsp[0]).await
+    }
+
     pub async fn account_balance(&mut self) -> Result<Vec<AccountBalance>> {
         let req = WsRequest {
             id: "account_balance".into(),
@@ -413,7 +421,6 @@ impl FuturesWebSocketApi {
 
     // handle error and unwrap result
     pub async fn unwrap_result<T: std::fmt::Debug>(&self, rsp: &mut WsResponse<T>) -> Result<T> {
-        // println!("{:?}\n", rsp);
         if let Some(err) = rsp.error.take() {
             return Err(Error::BinanceError { response: err });
         }
@@ -437,7 +444,7 @@ impl FuturesWebSocketApi {
             .map_err(|e| Error::Msg(format!("Error during handshake {e}")))?;
 
         let socket = Arc::new(Mutex::new(answer.0));
-        tokio::spawn(Self::auto_check_connection(socket.clone()));
+        tokio::spawn(Self::heartbeat(socket.clone()));
         self.socket = Some(socket);
         self.response = Some(answer.1);
         Ok(())
@@ -458,9 +465,9 @@ impl FuturesWebSocketApi {
 
         let mut result = vec![];
         let mut wait_time = reqs.len();
-        let mut socket = self.socket.as_mut().unwrap().lock().await;
-
         let timestamp = chrono::Utc::now().timestamp_millis();
+
+        let mut socket = self.socket.as_mut().unwrap().lock().await;
 
         // check connection
         socket
@@ -495,9 +502,11 @@ impl FuturesWebSocketApi {
                                     let signature = (self.sign)(qs::to_string(params)?.as_bytes());
                                     params.insert("signature".into(), Value::String(signature));
                                 }
+
                                 Authorization::ApiKey => {
                                     params.insert("apiKey".into(), Value::String(self.api_key.clone()));
                                 }
+
                                 // always nothing
                                 Authorization::None | Authorization::Both => todo!(),
                             }
@@ -517,19 +526,12 @@ impl FuturesWebSocketApi {
                 request.to_string()
             };
 
-            println!("{}\n", request_json);
             socket.send(Message::Text(request_json)).await?
         }
 
         while wait_time != 0 {
-            let message = socket.select_next_some().await?;
-            match message {
+            match socket.select_next_some().await? {
                 Message::Text(rsp) => {
-                    // println!(
-                    //     "{}\n",
-                    //     serde_json::to_string_pretty(&serde_json::from_str::<'_, serde_json::Value>(&rsp).unwrap())
-                    //         .unwrap()
-                    // );
                     result.push(serde_json::from_str::<'_, WsResponse<Rlt>>(&rsp)?);
                     wait_time -= 1;
                 }
@@ -618,66 +620,67 @@ mod tests {
 
         // println!("{:?}\n", ws_api.position_info("BTCUSDT").await.unwrap());
         // println!("{:?}\n", ws_api.account_info().await.unwrap());
-        println!("{:?}\n", ws_api.account_balance().await.unwrap());
-        // println!(
-        //     "{:?}",
-        //     ws_api
-        //         .place_batch_orders(vec![
-        //             OrderRequest {
-        //                 symbol: "BTCUSDT".into(),
-        //                 price: Some(60001.),
-        //                 quantity: Some(0.01),
-        //                 side: OrderSide::Buy,
-        //                 order_type: OrderType::Limit,
-        //                 time_in_force: Some(TimeInForce::GTC),
-        //                 position_side: None,
-        //                 reduce_only: None,
-        //                 stop_price: None,
-        //                 close_position: None,
-        //                 activation_price: None,
-        //                 callback_rate: None,
-        //                 working_type: None,
-        //                 price_protect: None,
-        //                 new_client_order_id: None,
-        //             },
-        //             OrderRequest {
-        //                 symbol: "BTCUSDT".into(),
-        //                 price: Some(59000.),
-        //                 quantity: Some(0.01),
-        //                 side: OrderSide::Sell,
-        //                 order_type: OrderType::Stop,
-        //                 time_in_force: Some(TimeInForce::GTC),
-        //                 position_side: None,
-        //                 reduce_only: Some(true),
-        //                 stop_price: Some(59000.),
-        //                 close_position: None,
-        //                 activation_price: None,
-        //                 callback_rate: None,
-        //                 working_type: None,
-        //                 price_protect: None,
-        //                 new_client_order_id: None,
-        //             },
-        //             OrderRequest {
-        //                 symbol: "BTCUSDT".into(),
-        //                 price: None,
-        //                 quantity: Some(0.01),
-        //                 side: OrderSide::Sell,
-        //                 order_type: OrderType::TakeProfitMarket,
-        //                 time_in_force: Some(TimeInForce::GTC),
-        //                 position_side: None,
-        //                 reduce_only: Some(true),
-        //                 stop_price: Some(64000.),
-        //                 close_position: None,
-        //                 activation_price: None,
-        //                 callback_rate: None,
-        //                 working_type: None,
-        //                 price_protect: None,
-        //                 new_client_order_id: None,
-        //             }
-        //         ],)
-        //         .await
-        //         .unwrap()
-        // );
+        // println!("{:?}\n", ws_api.account_balance().await.unwrap());
+        // println!("{:?}\n", ws_api.best_mark_price("btcusdt").await.unwrap());
+        println!(
+            "{:?}",
+            ws_api
+                .place_batch_orders(vec![
+                    OrderRequest {
+                        symbol: "BTCUSDT".into(),
+                        price: Some(60001.),
+                        quantity: Some(0.01),
+                        side: OrderSide::Buy,
+                        order_type: OrderType::Limit,
+                        time_in_force: Some(TimeInForce::GTC),
+                        position_side: None,
+                        reduce_only: None,
+                        stop_price: None,
+                        close_position: None,
+                        activation_price: None,
+                        callback_rate: None,
+                        working_type: None,
+                        price_protect: None,
+                        new_client_order_id: None,
+                    },
+                    OrderRequest {
+                        symbol: "BTCUSDT".into(),
+                        quantity: Some(0.01),
+                        side: OrderSide::Sell,
+                        order_type: OrderType::Stop,
+                        time_in_force: Some(TimeInForce::GTC),
+                        reduce_only: Some(true),
+                        price: Some(59000.),
+                        stop_price: Some(59000.),
+                        position_side: None,
+                        close_position: None,
+                        activation_price: None,
+                        callback_rate: None,
+                        working_type: None,
+                        price_protect: None,
+                        new_client_order_id: None,
+                    },
+                    OrderRequest {
+                        symbol: "BTCUSDT".into(),
+                        price: None,
+                        quantity: Some(0.01),
+                        side: OrderSide::Sell,
+                        order_type: OrderType::TakeProfitMarket,
+                        time_in_force: Some(TimeInForce::GTC),
+                        position_side: None,
+                        reduce_only: Some(true),
+                        stop_price: Some(68000.),
+                        close_position: None,
+                        activation_price: None,
+                        callback_rate: None,
+                        working_type: None,
+                        price_protect: None,
+                        new_client_order_id: None,
+                    }
+                ],)
+                .await
+                .unwrap()
+        );
 
         tokio::signal::ctrl_c().await;
         ws_api.disconnect().await;

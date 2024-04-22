@@ -135,11 +135,7 @@ impl<'a, WE: serde::de::DeserializeOwned> WebSockets<'a, WE> {
         if let Some((socket, _)) = self.socket.as_mut() {
             while running.load(Ordering::Relaxed) {
                 match socket.select_next_some().await? {
-                    Message::Text(msg) => {
-                        (self.handler)(from_str::<'_, WE>(msg.as_str())?)?;
-                        let timestamp = chrono::Utc::now().timestamp_millis().to_string().as_bytes().to_vec();
-                        socket.send(Message::Ping(timestamp)).await?;
-                    }
+                    Message::Text(msg) => (self.handler)(from_str::<'_, WE>(msg.as_str())?)?,
                     Message::Ping(ping) => socket.send(Message::Pong(ping)).await?,
                     Message::Close(e) => return Err(Error::Msg(format!("Disconnected {e:?}"))),
                     _ => {}

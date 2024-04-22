@@ -339,7 +339,7 @@ impl FuturesAccount {
         Ok(())
     }
 
-    pub async fn place_batch_orders(&self, orders: Vec<OrderRequest>) -> Result<Vec<Transaction>> {
+    pub async fn place_batch_orders(&self, orders: Vec<OrderRequest>) -> Result<Vec<serde_json::Value>> {
         let mut batch_orders = vec![];
         for order in orders {
             batch_orders.push(serialize_and_jsonf64_to_jsonstr(order)?);
@@ -363,78 +363,61 @@ mod tests {
         let secret_key: Option<String> =
             Some("f9eacfff89deb907d55a1a70abd5d0fd6907b96863c4842a4612828122bf5ce0".into());
         let account: FuturesAccount = crate::api::Binance::new_with_config(api_key.clone(), secret_key, &cfg);
+
+        // let order = OrderRequest {
+        //     symbol: "BTCUSDT".into(),
+        //     side: OrderSide::Sell,
+        //     position_side: None,
+        //     order_type: OrderType::Limit,
+        //     time_in_force: Some(TimeInForce::GTC),
+        //     quantity: Some(0.01),
+        //     reduce_only: None,
+        //     price: Some(68000.),
+        //     stop_price: None,
+        //     close_position: None,
+        //     activation_price: None,
+        //     callback_rate: None,
+        //     working_type: None,
+        //     price_protect: None,
+        //     new_client_order_id: None,
+        // };
+
         let order = OrderRequest {
             symbol: "BTCUSDT".into(),
             side: OrderSide::Sell,
-            position_side: None,
+            position_side: Some(PositionSide::Both),
             order_type: OrderType::Limit,
             time_in_force: Some(TimeInForce::GTC),
             quantity: Some(0.01),
             reduce_only: None,
-            price: Some(68000.),
+            price: Some(68000.0),
             stop_price: None,
             close_position: None,
             activation_price: None,
             callback_rate: None,
-            working_type: None,
-            price_protect: None,
+            working_type: Some(WorkingType::ContractPrice),
+            price_protect: Some(false),
             new_client_order_id: None,
         };
-
-        let order_2 = OrderRequest {
+        let order2 = OrderRequest {
             symbol: "BTCUSDT".into(),
             side: OrderSide::Buy,
-            position_side: None,
+            position_side: Some(PositionSide::Both),
             order_type: OrderType::StopMarket,
             time_in_force: Some(TimeInForce::GTC),
             quantity: Some(0.01),
-            reduce_only: None,
+            reduce_only: Some(true),
+            // price: Some(67000.0),
             price: None,
-            stop_price: Some(69000.),
+            stop_price: Some(69000.0),
             close_position: None,
             activation_price: None,
             callback_rate: None,
-            working_type: None,
+            working_type: Some(WorkingType::ContractPrice),
             price_protect: None,
             new_client_order_id: None,
         };
-        // account.cancel_all_open_orders("btcusdt").await.unwrap();
-        // account.place_batch_orders(vec![order, order_2]).await.unwrap();
-        let all_order = account.get_open_orders("btcusdt").await.unwrap();
-
-        let mut stop_order: OrderRequest = all_order
-            .iter()
-            .find(|x| match x.order_type {
-                OrderType::Stop | OrderType::StopMarket => true,
-                _ => false,
-            })
-            .cloned()
-            .unwrap()
-            .into();
-
-        let stop_price = 58000.;
-        match stop_order.order_type {
-            OrderType::Stop => {
-                stop_order.price = Some(stop_price);
-                stop_order.stop_price = Some(stop_price);
-            }
-            OrderType::StopMarket => stop_order.stop_price = Some(stop_price),
-            _ => (),
-        };
-        let symbol = stop_order.symbol.clone();
-        let client_id = stop_order.new_client_order_id.take();
-
-        // println!("{:?}", stop_order);
-        account.place_order(stop_order).await.unwrap();
-        account
-            .cancel_order(OrderCancellation {
-                symbol,
-                order_id: None,
-                orig_client_order_id: client_id,
-            })
-            .await
-            .unwrap();
-
-        // account.modify_multiple_orders(vec![stop_order]).await.unwrap();
+        println!("{:?}", account.place_batch_orders(vec![order2]).await.unwrap());
+        // let all_order = account.get_open_orders("btcusdt").await.unwrap();
     }
 }
